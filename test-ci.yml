@@ -1,0 +1,102 @@
+image: docker:latest
+
+services:
+  - docker:dind
+
+stages:
+  - prebuild  
+  - build
+  - test
+  - sast
+  - release
+  - preprod
+  - integration
+  - prod
+
+check-git-secrets:
+  stage: prebuild
+  script:
+      - docker pull dxa4481/trufflehog
+      - docker run --rm -v "(pwd):/proj dxa4481/trufflehog https://github.com/nVisium/django.nV.git --json > truffle-output.json
+  artifacts:
+    paths: [truffle-output.json]
+    expire_in: one week
+  allow_failure: true      
+
+build:
+  stage: build
+  image: python:3.6
+  before_script:
+   - pip3 install --upgrade virtualenv
+  script:
+   - virtualenv env
+   - source env/bin/activate
+   - pip install -r requirements.txt
+   - python manage.py check
+  
+test-environment:
+  stage: test
+  image: python:3.6
+  before_script:
+   - pip3 install --upgrade virtualenv
+  script:
+   - virtualenv env
+   - source env/bin/activate
+   - pip install -r requirements.txt
+   - python manage.py test taskManager
+  needs: [build] 
+
+sast-bandit: # SAST testing of application
+  stage: sast
+  image: node:alpine3.10
+  before_script:
+    - apk update && apk add py3-pip && apk add git
+  script:
+    - git clone https://github.com/nVisium/django.nV.git webapp
+    - cd webapp
+    - pip3 install bandit
+    - bandit -r . -f json > bandit-ouput.json
+  artifacts:
+    paths: [bandit-output.json]
+    expire_in: one week
+  allow_failure: true
+  needs: [build] 
+
+oast-retirejs: #Software component analysis
+  stage: test
+  image: node:alpine3.10
+  script:
+    - npm install
+    - npm install -g retire # Install retirejs npm package.
+    - retire --outputformat json --outputpath retirejs-report.json --severity high --exitwith 0
+  artifacts:
+    paths: [retirejs-report.json]
+    when: always # What is this for?
+    expire_in: one week
+  allow_failure: true
+
+oast-safety: ##Software component analysis
+  stage: test
+  script:
+    - docker pull hysnsec/safety  # We are going to pull the hysnsec/safety image to run the safety scanner
+    # third party components are stored in requirements.txt for python, so we will scan this particular file with safety.
+    - docker run -v $(pwd):/src --rm hysnsec/safety check -r requirements.txt --json > oast-results.json
+  artifacts:
+    paths: [oast-results.json]
+    when: always # What does this do?
+  allow_failure: true
+
+nikto-dast:
+  stage: integration
+  script:
+    - docker pull hysnsec/nikto
+    - docker run --rm -v $(pwd):/tmp hysnsec/nikto -h https://prod-509MzXbg.lab.practical-devsecops.training -o /tmp/nikto-output.xml
+  artifacts:
+    paths: [nikto-output.xml]  
+  allow_failure: true # Even if the job fails, continue to the next stages
+
+prod:
+  stage: prod
+  script:
+    - echo "This is a deploy step."
+  # when: manual # Continuous Delivery
